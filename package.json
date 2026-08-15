@@ -1,6 +1,6 @@
 {
   "name": "bitbucket-mcp",
-  "version": "5.0.6",
+  "version": "5.0.7",
   "description": "Model Context Protocol (MCP) server for Bitbucket Cloud and Server API integration",
   "mcpName": "io.github.MatanYemini/bitbucket-mcp",
   "type": "module",
@@ -52,6 +52,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.3",
     "axios": "^1.6.5",
+    "dotenv": "^17.3.1",
     "winston": "^3.11.0"
   },
   "devDependencies": {

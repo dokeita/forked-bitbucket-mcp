@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "dotenv/config";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -894,7 +895,8 @@ class BitbucketServer {
         },
         {
           name: "addPullRequestComment",
-          description: "Add a comment to a pull request (general or inline)",
+          description:
+            "Add a comment to a pull request (general, inline, or a threaded reply to another comment)",
           inputSchema: {
             type: "object",
             properties: {
@@ -916,10 +918,15 @@ class BitbucketServer {
                 description:
                   "Whether to create this comment as a pending comment (draft state)",
               },
+              parent_id: {
+                type: "number",
+                description:
+                  "If set, posts this comment as a threaded reply to the given comment id. The reply inherits the parent's inline anchor (if any); do not also pass `inline` when replying.",
+              },
               inline: {
                 type: "object",
                 description:
-                  "Inline comment information for commenting on specific lines",
+                  "Inline comment information for commenting on specific lines. Ignored when `parent_id` is set.",
                 properties: {
                   path: {
                     type: "string",
@@ -937,11 +944,6 @@ class BitbucketServer {
                   },
                 },
                 required: ["path"],
-              },
-              parent_id: {
-                type: "number",
-                description:
-                  "ID of the parent comment to reply to. Use this to create a threaded reply to an existing comment.",
               },
             },
             required: ["workspace", "repo_slug", "pull_request_id", "content"],
@@ -1350,6 +1352,11 @@ class BitbucketServer {
                 type: "string",
                 enum: ["manual", "push", "pullrequest", "schedule"],
                 description: "Filter pipelines by trigger type",
+              },
+              sort: {
+                type: "string",
+                description:
+                  "Field to sort by. Prefix with '-' for descending order. Supported fields: created_on, creator.uuid. Example: '-created_on' for newest first.",
               },
             },
             required: ["workspace", "repo_slug"],
@@ -2115,7 +2122,8 @@ class BitbucketServer {
                 | "push"
                 | "pullrequest"
                 | "schedule",
-              args.limit as number
+              args.limit as number,
+              args.sort as string
             );
           case "getPipelineRun":
             return await this.getPipelineRun(
@@ -2720,8 +2728,11 @@ class BitbucketServer {
         pull_request_id,
       });
 
+      // Bitbucket Cloud returns 400 when this POST carries no body or no
+      // Content-Type. Pass `{}` so axios infers `application/json`.
       const response = await this.api.post(
-        `/repositories/${workspace}/${repo_slug}/pullrequests/${pull_request_id}/approve`
+        `/repositories/${workspace}/${repo_slug}/pullrequests/${pull_request_id}/approve`,
+        {}
       );
 
       return {
@@ -3056,7 +3067,11 @@ class BitbucketServer {
         workspace,
         repo_slug,
         pull_request_id,
-        inline: inline ? "inline comment" : "general comment",
+        mode: parent_id
+          ? "threaded reply"
+          : inline
+          ? "inline comment"
+          : "general comment",
       });
 
       // Prepare the comment data
@@ -3071,18 +3086,15 @@ class BitbucketServer {
         commentData.pending = pending;
       }
 
-      // Add parent comment ID if provided (for threaded replies)
-      if (parent_id !== undefined) {
+      // Threaded reply: inherit the parent's inline anchor; ignore any `inline`
+      // arg the caller supplied to avoid Bitbucket 400s from conflicting anchors.
+      if (parent_id !== undefined && parent_id !== null) {
         commentData.parent = { id: parent_id };
-      }
-
-      // Add inline information if provided
-      if (inline) {
+      } else if (inline) {
         commentData.inline = {
           path: inline.path,
         };
 
-        // Add line number information based on the type
         if (inline.from !== undefined) {
           commentData.inline.from = inline.from;
         }
@@ -3889,7 +3901,8 @@ class BitbucketServer {
       | "STOPPED",
     target_branch?: string,
     trigger_type?: "manual" | "push" | "pullrequest" | "schedule",
-    legacyLimit?: number
+    legacyLimit?: number,
+    sort?: string
   ) {
     try {
       logger.info("Listing pipeline runs", {
@@ -3901,12 +3914,14 @@ class BitbucketServer {
         status,
         target_branch,
         trigger_type,
+        sort,
       });
 
       const params: Record<string, any> = {};
       if (status) params.status = status;
       if (target_branch) params["target.branch"] = target_branch;
       if (trigger_type) params.trigger_type = trigger_type;
+      if (sort) params.sort = sort;
 
       const result = await this.paginator.fetchValues(
         `/repositories/${workspace}/${repo_slug}/pipelines`,
@@ -4075,8 +4090,11 @@ class BitbucketServer {
         pipeline_uuid,
       });
 
+      // Bitbucket Cloud returns 400 when this POST carries no body or no
+      // Content-Type. Pass `{}` so axios infers `application/json`.
       const response = await this.api.post(
-        `/repositories/${workspace}/${repo_slug}/pipelines/${pipeline_uuid}/stop`
+        `/repositories/${workspace}/${repo_slug}/pipelines/${pipeline_uuid}/stop`,
+        {}
       );
 
       return {
@@ -4519,8 +4537,11 @@ class BitbucketServer {
         targetCommentId = comment_id;
       }
 
+      // Bitbucket Cloud requires POST /resolve to carry a JSON body (at minimum `{}`)
+      // and a matching Content-Type header; otherwise the gateway returns 400.
+      // Pass an explicit empty-object body so axios sets `Content-Type: application/json`.
       const response = resolved
-        ? await this.api.post(resolveUrl(targetCommentId))
+        ? await this.api.post(resolveUrl(targetCommentId), {})
         : await this.api.delete(resolveUrl(targetCommentId));
 
       const responseText =
