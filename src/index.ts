@@ -361,6 +361,80 @@ function normalizeBitbucketConfig(rawConfig: BitbucketConfig): BitbucketConfig {
   return normalizedConfig;
 }
 
+// =========== MERGE STRATEGY ===========
+
+/**
+ * Merge strategy values accepted by the Bitbucket Cloud API
+ * (POST /repositories/{workspace}/{repo_slug}/pullrequests/{id}/merge).
+ * Bitbucket rejects hyphenated values such as "merge-commit" with HTTP 400.
+ */
+export type MergeStrategy = "merge_commit" | "squash" | "fast_forward";
+
+/**
+ * Values the mergePullRequest tool accepts. The hyphenated forms are kept
+ * as aliases for callers built against the previous tool schema.
+ */
+export type MergeStrategyInput = MergeStrategy | "merge-commit" | "fast-forward";
+
+export const MERGE_STRATEGY_INPUT_VALUES: readonly MergeStrategyInput[] = [
+  "merge_commit",
+  "squash",
+  "fast_forward",
+  "merge-commit",
+  "fast-forward",
+];
+
+const MERGE_STRATEGY_ALIASES: Record<string, MergeStrategy> = {
+  "merge-commit": "merge_commit",
+  "fast-forward": "fast_forward",
+};
+
+/**
+ * Converts a merge strategy to the value Bitbucket expects.
+ * Unknown values are passed through so that Bitbucket can report the error.
+ */
+export function normalizeMergeStrategy(strategy: string): string {
+  return MERGE_STRATEGY_ALIASES[strategy] ?? strategy;
+}
+
+/**
+ * Builds the request body for the merge pull request API.
+ */
+export function buildMergePullRequestBody(
+  message?: string,
+  strategy?: string
+): Record<string, string> {
+  const data: Record<string, string> = {};
+  if (message) data.message = message;
+  if (strategy) data.merge_strategy = normalizeMergeStrategy(strategy);
+  return data;
+}
+
+// =========== API ERROR DESCRIPTION ===========
+
+/**
+ * Builds an error description that includes the HTTP status and the error
+ * message returned by Bitbucket. axios's own error.message only contains
+ * "Request failed with status code <status>", which hides the cause.
+ */
+export function describeApiError(error: unknown): string {
+  if (axios.isAxiosError(error)) {
+    const status = error.response?.status;
+    const body = error.response?.data as any;
+    const detail =
+      body?.error?.message ??
+      (typeof body === "string" && body !== "" ? body : undefined) ??
+      (body && typeof body === "object" ? JSON.stringify(body) : undefined);
+    if (status === undefined) {
+      return error.message;
+    }
+    return detail
+      ? `HTTP ${status}: ${detail}`
+      : `HTTP ${status}: ${error.message}`;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
 /**
  * Represents a Bitbucket pipeline
  */
@@ -825,8 +899,11 @@ class BitbucketServer {
               message: { type: "string", description: "Merge commit message" },
               strategy: {
                 type: "string",
-                enum: ["merge-commit", "squash", "fast-forward"],
-                description: "Merge strategy",
+                enum: [...MERGE_STRATEGY_INPUT_VALUES],
+                description:
+                  "Merge strategy. Bitbucket API expects merge_commit / squash / fast_forward. " +
+                  "Hyphenated aliases (merge-commit / fast-forward) are accepted and normalized. " +
+                  "If omitted, Bitbucket applies its default strategy.",
               },
             },
             required: ["workspace", "repo_slug", "pull_request_id"],
@@ -1982,7 +2059,7 @@ class BitbucketServer {
               args.repo_slug as string,
               args.pull_request_id as string,
               args.message as string,
-              args.strategy as "merge-commit" | "squash" | "fast-forward"
+              args.strategy as MergeStrategyInput
             );
           case "getPullRequestComments":
             return await this.getPullRequestComments(
@@ -2569,9 +2646,7 @@ class BitbucketServer {
       });
       throw new McpError(
         ErrorCode.InternalError,
-        `Failed to create pull request: ${
-          error instanceof Error ? error.message : String(error)
-        }`
+        `Failed to create pull request: ${describeApiError(error)}`
       );
     }
   }
@@ -2657,9 +2732,7 @@ class BitbucketServer {
       });
       throw new McpError(
         ErrorCode.InternalError,
-        `Failed to update pull request: ${
-          error instanceof Error ? error.message : String(error)
-        }`
+        `Failed to update pull request: ${describeApiError(error)}`
       );
     }
   }
@@ -2837,9 +2910,7 @@ class BitbucketServer {
       });
       throw new McpError(
         ErrorCode.InternalError,
-        `Failed to decline pull request: ${
-          error instanceof Error ? error.message : String(error)
-        }`
+        `Failed to decline pull request: ${describeApiError(error)}`
       );
     }
   }
@@ -2849,7 +2920,7 @@ class BitbucketServer {
     repo_slug: string,
     pull_request_id: string,
     message?: string,
-    strategy?: "merge-commit" | "squash" | "fast-forward"
+    strategy?: MergeStrategyInput
   ) {
     try {
       logger.info("Merging Bitbucket pull request", {
@@ -2860,9 +2931,7 @@ class BitbucketServer {
       });
 
       // Build request data
-      const data: Record<string, any> = {};
-      if (message) data.message = message;
-      if (strategy) data.merge_strategy = strategy;
+      const data = buildMergePullRequestBody(message, strategy);
 
       const response = await this.api.post(
         `/repositories/${workspace}/${repo_slug}/pullrequests/${pull_request_id}/merge`,
@@ -2886,9 +2955,7 @@ class BitbucketServer {
       });
       throw new McpError(
         ErrorCode.InternalError,
-        `Failed to merge pull request: ${
-          error instanceof Error ? error.message : String(error)
-        }`
+        `Failed to merge pull request: ${describeApiError(error)}`
       );
     }
   }
@@ -3125,9 +3192,7 @@ class BitbucketServer {
       });
       throw new McpError(
         ErrorCode.InternalError,
-        `Failed to add pull request comment: ${
-          error instanceof Error ? error.message : String(error)
-        }`
+        `Failed to add pull request comment: ${describeApiError(error)}`
       );
     }
   }
@@ -3446,9 +3511,7 @@ class BitbucketServer {
       });
       throw new McpError(
         ErrorCode.InternalError,
-        `Failed to add pending pull request comment: ${
-          error instanceof Error ? error.message : String(error)
-        }`
+        `Failed to add pending pull request comment: ${describeApiError(error)}`
       );
     }
   }
@@ -3592,9 +3655,7 @@ class BitbucketServer {
       });
       throw new McpError(
         ErrorCode.InternalError,
-        `Failed to create draft pull request: ${
-          error instanceof Error ? error.message : String(error)
-        }`
+        `Failed to create draft pull request: ${describeApiError(error)}`
       );
     }
   }
@@ -4441,9 +4502,7 @@ class BitbucketServer {
       });
       throw new McpError(
         ErrorCode.InternalError,
-        `Failed to update pull request comment: ${
-          error instanceof Error ? error.message : String(error)
-        }`
+        `Failed to update pull request comment: ${describeApiError(error)}`
       );
     }
   }
